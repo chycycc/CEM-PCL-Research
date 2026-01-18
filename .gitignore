@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# VS Code
+.vscode/
+
+# Project specific
+save/
+data/
+vectors/
+results.txt
+config.txt
+events.out.tfevents*
