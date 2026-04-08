@@ -73,7 +73,7 @@ def make_model(vocab, dec_num):
 
 
 def train(model, train_set, dev_set):
-    check_iter = 50   # 【修改1】原值是 2000 -> 改成 50 (跑50步就验证)
+    check_iter = 2000   # 【恢复】从 50 改回 2000 (每 2000 步正式验证一次)
     try:
         model.train()
         best_ppl = 1000
@@ -81,7 +81,7 @@ def train(model, train_set, dev_set):
         writer = SummaryWriter(log_dir=config.save_path)
         weights_best = deepcopy(model.state_dict())
         data_iter = make_infinite(train_set)
-        for n_iter in tqdm(range(100)): # 【修改2】原值是 1000000 -> 改成 100 (总共只跑100步)
+        for n_iter in tqdm(range(1000000)): # 【恢复】从 100 改回 1000000 (完整训练模式)
             if "cem" in config.model:
                 loss, ppl, bce, acc, _, _ = model.train_one_batch(
                     next(data_iter), n_iter
