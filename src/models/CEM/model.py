@@ -26,23 +26,6 @@ from src.utils.constants import MAP_EMO
 from sklearn.metrics import accuracy_score
 
 
-# ================= [新增: EPCL Loss] =================
-class PrototypeContrastiveLoss(nn.Module):
-    def __init__(self, num_prototypes, input_dim, temperature=0.07):
-        super(PrototypeContrastiveLoss, self).__init__()
-        self.temperature = temperature
-        self.prototypes = nn.Parameter(torch.randn(num_prototypes, input_dim))
-        self.prototypes.data = F.normalize(self.prototypes.data, p=2, dim=1)
-
-    def forward(self, features, labels):
-        features = F.normalize(features, p=2, dim=1)
-        prototypes = F.normalize(self.prototypes, p=2, dim=1)
-        logits = torch.matmul(features, prototypes.T) / self.temperature
-        loss = F.cross_entropy(logits, labels)
-        return loss
-# ======================================================
-
-
 class Encoder(nn.Module):
     """
     A Transformer Encoder module.
@@ -362,10 +345,6 @@ class CEM(nn.Module):
         self.vocab = vocab
         self.vocab_size = vocab.n_words
 
-        # === [新增] 初始化 EPCL Loss ===
-        self.epcl_criterion = PrototypeContrastiveLoss(decoder_number, config.hidden_dim).to(config.device)
-        # ================================
-
         self.word_freq = np.zeros(self.vocab_size)
 
         self.is_eval = is_eval
@@ -482,7 +461,7 @@ class CEM(nn.Module):
 
         return torch.FloatTensor(weight).to(config.device)
 
-    def forward(self, batch, need_rep=False):  # [修改] 增加 need_rep 参数
+    def forward(self, batch):
         ## Encode the context (Semantic Knowledge)
         enc_batch = batch["input_batch"]
         src_mask = enc_batch.data.eq(config.PAD_idx).unsqueeze(1)
@@ -512,20 +491,13 @@ class CEM(nn.Module):
         emo_cls = torch.mean(cs_outputs[-1], dim=1).unsqueeze(1)
 
         dim = [-1, enc_outputs.shape[1], -1]
-
         # Emotion
         if not config.woEMO:
             emo_concat = torch.cat([enc_outputs, emo_cls.expand(dim)], dim=-1)
             emo_ref_ctx = self.emo_ref_encoder(emo_concat, src_mask)
-            # === [修改 START] ===
-            emo_rep = emo_ref_ctx[:, 0]
-            emo_logits = self.emo_lin(emo_rep)
-            # === [修改 END] ===
+            emo_logits = self.emo_lin(emo_ref_ctx[:, 0])
         else:
-            # === [修改 START] ===
-            emo_rep = enc_outputs[:, 0]
-            emo_logits = self.emo_lin(emo_rep)
-            # === [修改 END] ===
+            emo_logits = self.emo_lin(enc_outputs[:, 0])
 
         # Cognition
         cog_outputs = []
@@ -545,11 +517,7 @@ class CEM(nn.Module):
             cog_ref_ctx = cog_contrib * cog_ref_ctx
             cog_ref_ctx = self.cog_lin(cog_ref_ctx)
 
-        # === [修改返回值] ===
-        if need_rep:
-            return src_mask, cog_ref_ctx, emo_logits, emo_rep
-        else:
-            return src_mask, cog_ref_ctx, emo_logits
+        return src_mask, cog_ref_ctx, emo_logits
 
     def train_one_batch(self, batch, iter, train=True):
         (
@@ -569,8 +537,7 @@ class CEM(nn.Module):
         else:
             self.optimizer.zero_grad()
 
-        # === [修改] 训练时开启 need_rep=True ===
-        src_mask, ctx_output, emo_logits, emo_rep = self.forward(batch, need_rep=True)
+        src_mask, ctx_output, emo_logits = self.forward(batch)
 
         # Decode
         sos_token = (
@@ -601,15 +568,6 @@ class CEM(nn.Module):
             dec_batch.contiguous().view(-1),
         )
 
-        # === [新增] 计算 EPCL 对比损失 ===
-        if train:
-            loss_epcl = self.epcl_criterion(emo_rep, emo_label)
-        else:
-            loss_epcl = 0.0
-
-        lambda_epcl = 0.1  # 对比损失权重系数
-        # ================================
-
         if not (config.woDiv):
             _, preds = logit.max(dim=-1)
             preds = self.clean_preds(preds)
@@ -622,11 +580,9 @@ class CEM(nn.Module):
                 dec_batch.contiguous().view(-1),
             )
             div_loss /= target_tokens
-            # [修改] 加入 EPCL 损失
-            loss = emo_loss + 1.5 * div_loss + ctx_loss + (lambda_epcl * loss_epcl)
+            loss = emo_loss + 1.5 * div_loss + ctx_loss
         else:
-            # [修改] 加入 EPCL 损失
-            loss = emo_loss + ctx_loss + (lambda_epcl * loss_epcl)
+            loss = emo_loss + ctx_loss
 
         pred_program = np.argmax(emo_logits.detach().cpu().numpy(), axis=1)
         program_acc = accuracy_score(batch["program_label"], pred_program)
