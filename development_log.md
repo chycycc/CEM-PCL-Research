@@ -486,3 +486,20 @@ python main.py --model cem --batch_size 16 --cuda
 1. **理想状态**：PPL ≤ 36.7，Accuracy ≥ 37.5%。直接封板写论文。
 2. **可接受妥协**：PPL 退回 ~36.85（与 Baseline 持平），Accuracy 涨至 37.6%。在 ESC 任务中情感准确率权重大于语言流畅度，可接受。
 3. **最坏情况**：Accuracy 依然上不去。→ 采用"动态退火"方案：温度从 0.5 在 5000 步后平滑降至 0.1，替代静态温度。
+
+### 7.5 双轨保存机制 (Dual-Track Checkpoint)
+
+**问题发现**：原始 `main.py` 的 Early Stopping 和模型保存逻辑**完全基于 Validation PPL**，不关注 Accuracy。这意味着当 PPL 已触底反弹、但 Accuracy 仍在稳步攀升时，Early Stopping 会直接掐断训练，导致 Accuracy 最优的权重永远不会被保存。
+
+**解决方案**：在 v3 训练启动前，实施了"双轨保存"机制：
+
+| 保存轨道 | 触发条件 | 文件命名格式 | 用途 |
+| --- | --- | --- | --- |
+| PPL 轨（原有） | `ppl_val <= best_ppl` | `CEM_步数_PPL值` | 语言生成质量最优权重 |
+| Accuracy 轨（新增） | `acc_val >= best_acc` | `CEM_ACC_步数_准确率` | 情感分类精度最优权重 |
+
+**代码改动**：
+- `model_epcl.py`：新增 `save_model_acc()` 方法
+- `main.py`：新增 `best_acc` 追踪变量，验证时并行检查两条保存线
+
+**论文价值**：两组权重可分别用于主实验表和消融实验，若存在 PPL/Accuracy trade-off 则可在 Discussion 章节展开讨论。

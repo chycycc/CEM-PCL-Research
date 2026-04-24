@@ -92,6 +92,27 @@ tensorboard --logdir save/test
 
 ---
 
+## 四点五、双轨保存机制说明
+
+本轮训练启用了**双轨保存**，训练完成后 `save/test/` 目录下会出现两类权重文件：
+
+| 文件前缀 | 含义 | 示例 |
+| --- | --- | --- |
+| `CEM_步数_PPL` | PPL 最优权重（Early Stopping 保存） | `CEM_19999_36.6540` |
+| `CEM_ACC_步数_准确率` | Accuracy 最优权重（独立保存） | `CEM_ACC_17999_0.3850` |
+
+**测试时**：分别用两个权重各跑一次 test，选数据最好看的组合写论文。
+
+```powershell
+# 用 PPL 最优权重测试
+python main.py --model cem --batch_size 16 --cuda --test --model_path save/test/CEM_19999_36.6540
+
+# 用 Accuracy 最优权重测试
+python main.py --model cem --batch_size 16 --cuda --test --model_path save/test/CEM_ACC_17999_0.3850
+```
+
+---
+
 ## 五、应急预案
 
 **如果 Accuracy 依然 < 37.4%**：
