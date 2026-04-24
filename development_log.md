@@ -521,3 +521,22 @@ python main.py --model cem --batch_size 16 --cuda
 - **感知导向型 (以 v3 为代表)**：极具攻击性的惩罚 ($\tau=0.2, \lambda=0.1$) 强制拉扯语义空间逼着模型学会做分类器，结果促成了 37.70% 的高精确感知能力，但破坏了自由行文导致的 PPL 置于 37.6。
 
 **结论**：这就是一篇出色的研究：我们完整探明了 EPCL （原型对比学习）在这整个域中的**边界**。手中握有的这两份 SOTA（v2 的 PPL，v3 的 Accuracy），刚好构成了消融实验的完整拼图！
+
+### 7.7 Round 4 — 动态温度退火 (Dynamic Temperature Annealing)
+
+**v3 的根本矛盾**：PPL 极小值和 Accuracy 极大值"错位 6000 步"（Step 19999 vs 13999），说明静态超参数已被榨干。语义收敛与分类收敛在训练中后期严重梯度拉扯。
+
+**v4 终极方案**：抛弃固定温度，实施动态退火调度，让温度和权重随训练阶段自动适配：
+
+| 参数 | v3 (静态) | v4 (动态退火) |
+| --- | --- | --- |
+| **温度 τ** | 固定 0.2 | `max(0.1, 0.5 - 0.4×min(1, iter/5000))` |
+| **最终权重 λ** | 0.1 | 0.05 |
+| **Warmup** | 5000 步 | 5000 步 |
+
+**核心设计理念**：隐式课程学习 (Implicit Curriculum Learning)——前期高温保护语言底盘（"先学说话"），后期低温锐利切分情感边界（"再学读心"），构建由粗到细的情感识别课程。
+
+**代码改动**（均在 `model.py` 中）：
+1. `PrototypeContrastiveLoss.__init__`：移除固定 `temperature` 参数
+2. `PrototypeContrastiveLoss.forward`：新增 `tau` 参数，接收动态温度
+3. `train_one_batch`：计算 `current_tau` 退火值并传入 `forward`

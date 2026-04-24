@@ -26,6 +26,23 @@ from src.utils.constants import MAP_EMO
 from sklearn.metrics import accuracy_score
 
 
+# ================= [新增: EPCL Loss v4 - 动态温度] =================
+class PrototypeContrastiveLoss(nn.Module):
+    def __init__(self, num_prototypes, input_dim):
+        super(PrototypeContrastiveLoss, self).__init__()
+        self.prototypes = nn.Parameter(torch.randn(num_prototypes, input_dim))
+        nn.init.xavier_uniform_(self.prototypes)
+        self.prototypes.data = F.normalize(self.prototypes.data, p=2, dim=1)
+
+    def forward(self, features, labels, tau):
+        features = F.normalize(features, p=2, dim=1)
+        prototypes = F.normalize(self.prototypes, p=2, dim=1)
+        logits = torch.matmul(features, prototypes.T) / tau
+        loss = F.cross_entropy(logits, labels)
+        return loss
+# ======================================================
+
+
 class Encoder(nn.Module):
     """
     A Transformer Encoder module.
@@ -345,6 +362,10 @@ class CEM(nn.Module):
         self.vocab = vocab
         self.vocab_size = vocab.n_words
 
+        # === [新增] 初始化 EPCL Loss ===
+        self.epcl_criterion = PrototypeContrastiveLoss(decoder_number, config.hidden_dim).to(config.device)
+        # ================================
+
         self.word_freq = np.zeros(self.vocab_size)
 
         self.is_eval = is_eval
@@ -431,6 +452,21 @@ class CEM(nn.Module):
         self.best_path = model_save_path
         torch.save(state, model_save_path)
 
+    # === [新增] 按 Accuracy 保存最优权重 ===
+    def save_model_acc(self, best_acc, iter):
+        state = {
+            "iter": iter,
+            "optimizer": self.optimizer.state_dict(),
+            "best_acc": best_acc,
+            "model": self.state_dict(),
+        }
+        model_save_path = os.path.join(
+            self.model_dir,
+            "CEM_ACC_{}_{:.4f}".format(iter, best_acc),
+        )
+        torch.save(state, model_save_path)
+    # ======================================
+
     def clean_preds(self, preds):
         res = []
         preds = preds.cpu().tolist()
@@ -461,7 +497,7 @@ class CEM(nn.Module):
 
         return torch.FloatTensor(weight).to(config.device)
 
-    def forward(self, batch):
+    def forward(self, batch, need_rep=False):  # [修改] 增加 need_rep 参数
         ## Encode the context (Semantic Knowledge)
         enc_batch = batch["input_batch"]
         src_mask = enc_batch.data.eq(config.PAD_idx).unsqueeze(1)
@@ -491,13 +527,20 @@ class CEM(nn.Module):
         emo_cls = torch.mean(cs_outputs[-1], dim=1).unsqueeze(1)
 
         dim = [-1, enc_outputs.shape[1], -1]
+
         # Emotion
         if not config.woEMO:
             emo_concat = torch.cat([enc_outputs, emo_cls.expand(dim)], dim=-1)
             emo_ref_ctx = self.emo_ref_encoder(emo_concat, src_mask)
-            emo_logits = self.emo_lin(emo_ref_ctx[:, 0])
+            # === [修改 START] ===
+            emo_rep = emo_ref_ctx[:, 0]
+            emo_logits = self.emo_lin(emo_rep)
+            # === [修改 END] ===
         else:
-            emo_logits = self.emo_lin(enc_outputs[:, 0])
+            # === [修改 START] ===
+            emo_rep = enc_outputs[:, 0]
+            emo_logits = self.emo_lin(emo_rep)
+            # === [修改 END] ===
 
         # Cognition
         cog_outputs = []
@@ -517,7 +560,11 @@ class CEM(nn.Module):
             cog_ref_ctx = cog_contrib * cog_ref_ctx
             cog_ref_ctx = self.cog_lin(cog_ref_ctx)
 
-        return src_mask, cog_ref_ctx, emo_logits
+        # === [修改返回值] ===
+        if need_rep:
+            return src_mask, cog_ref_ctx, emo_logits, emo_rep
+        else:
+            return src_mask, cog_ref_ctx, emo_logits
 
     def train_one_batch(self, batch, iter, train=True):
         (
@@ -537,7 +584,8 @@ class CEM(nn.Module):
         else:
             self.optimizer.zero_grad()
 
-        src_mask, ctx_output, emo_logits = self.forward(batch)
+        # === [修改] 训练时开启 need_rep=True ===
+        src_mask, ctx_output, emo_logits, emo_rep = self.forward(batch, need_rep=True)
 
         # Decode
         sos_token = (
@@ -568,6 +616,18 @@ class CEM(nn.Module):
             dec_batch.contiguous().view(-1),
         )
 
+        # === [v4] 动态温度退火 + 权重调度 ===
+        # 温度 tau: 前 5000 步从 0.5 平滑降到 0.1
+        current_tau = max(0.1, 0.5 - 0.4 * min(1.0, iter / 5000.0))
+        # 权重 lambda: 前 5000 步从 0 线性升到 0.05
+        lambda_epcl = 0.05 * min(1.0, iter / 5000.0) if train else 0.05
+
+        if train:
+            loss_epcl = self.epcl_criterion(emo_rep, emo_label, current_tau)
+        else:
+            loss_epcl = 0.0
+        # ================================
+
         if not (config.woDiv):
             _, preds = logit.max(dim=-1)
             preds = self.clean_preds(preds)
@@ -580,9 +640,11 @@ class CEM(nn.Module):
                 dec_batch.contiguous().view(-1),
             )
             div_loss /= target_tokens
-            loss = emo_loss + 1.5 * div_loss + ctx_loss
+            # [修改] 加入 EPCL 损失
+            loss = emo_loss + 1.5 * div_loss + ctx_loss + (lambda_epcl * loss_epcl)
         else:
-            loss = emo_loss + ctx_loss
+            # [修改] 加入 EPCL 损失
+            loss = emo_loss + ctx_loss + (lambda_epcl * loss_epcl)
 
         pred_program = np.argmax(emo_logits.detach().cpu().numpy(), axis=1)
         program_acc = accuracy_score(batch["program_label"], pred_program)
