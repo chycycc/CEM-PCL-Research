@@ -453,6 +453,21 @@ class CEM(nn.Module):
         self.best_path = model_save_path
         torch.save(state, model_save_path)
 
+    # === [新增] 按 Accuracy 保存最优权重 ===
+    def save_model_acc(self, best_acc, iter):
+        state = {
+            "iter": iter,
+            "optimizer": self.optimizer.state_dict(),
+            "best_acc": best_acc,
+            "model": self.state_dict(),
+        }
+        model_save_path = os.path.join(
+            self.model_dir,
+            "CEM_ACC_{}_{:.4f}".format(iter, best_acc),
+        )
+        torch.save(state, model_save_path)
+    # ======================================
+
     def clean_preds(self, preds):
         res = []
         preds = preds.cpu().tolist()

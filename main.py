@@ -77,6 +77,7 @@ def train(model, train_set, dev_set):
     try:
         model.train()
         best_ppl = 1000
+        best_acc = 0.0  # [新增] 追踪最佳 Accuracy
         patient = 0
         writer = SummaryWriter(log_dir=config.save_path)
         weights_best = deepcopy(model.state_dict())
@@ -118,6 +119,11 @@ def train(model, train_set, dev_set):
                     weights_best = deepcopy(model.state_dict())
                 else:
                     patient += 1
+                # === [新增] 双轨保存：按 Accuracy 独立保存 ===
+                if acc_val >= best_acc:
+                    best_acc = acc_val
+                    model.save_model_acc(best_acc, n_iter)
+                # ============================================
                 if patient > 2:
                     break
 
