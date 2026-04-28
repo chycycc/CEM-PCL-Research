@@ -28,7 +28,7 @@ from sklearn.metrics import accuracy_score
 
 # ================= [新增: EPCL Loss] =================
 class PrototypeContrastiveLoss(nn.Module):
-    def __init__(self, num_prototypes, input_dim, temperature=0.2):
+    def __init__(self, num_prototypes, input_dim, temperature=0.3):
         super(PrototypeContrastiveLoss, self).__init__()
         self.temperature = temperature
         self.prototypes = nn.Parameter(torch.randn(num_prototypes, input_dim))
@@ -623,8 +623,8 @@ class CEM(nn.Module):
         else:
             loss_epcl = 0.0
 
-        # 引入 Warm-up: 前 5000 step 线性增加到 0.1
-        lambda_epcl = 0.1 * min(1.0, iter / 5000.0) if train else 0.1
+        # 引入 Warm-up: 前 3000 step 线性增加到 0.07
+        lambda_epcl = 0.07 * min(1.0, iter / 3000.0) if train else 0.07
         # ================================
 
         if not (config.woDiv):

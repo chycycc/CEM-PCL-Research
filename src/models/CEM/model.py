@@ -26,18 +26,19 @@ from src.utils.constants import MAP_EMO
 from sklearn.metrics import accuracy_score
 
 
-# ================= [新增: EPCL Loss v4 - 动态温度] =================
+# ================= [新增: EPCL Loss v5 - 甜区静态温度] =================
 class PrototypeContrastiveLoss(nn.Module):
-    def __init__(self, num_prototypes, input_dim):
+    def __init__(self, num_prototypes, input_dim, temperature=0.3):
         super(PrototypeContrastiveLoss, self).__init__()
+        self.temperature = temperature
         self.prototypes = nn.Parameter(torch.randn(num_prototypes, input_dim))
         nn.init.xavier_uniform_(self.prototypes)
         self.prototypes.data = F.normalize(self.prototypes.data, p=2, dim=1)
 
-    def forward(self, features, labels, tau):
+    def forward(self, features, labels):
         features = F.normalize(features, p=2, dim=1)
         prototypes = F.normalize(self.prototypes, p=2, dim=1)
-        logits = torch.matmul(features, prototypes.T) / tau
+        logits = torch.matmul(features, prototypes.T) / self.temperature
         loss = F.cross_entropy(logits, labels)
         return loss
 # ======================================================
@@ -616,14 +617,12 @@ class CEM(nn.Module):
             dec_batch.contiguous().view(-1),
         )
 
-        # === [v4] 动态温度退火 + 权重调度 ===
-        # 温度 tau: 前 5000 步从 0.5 平滑降到 0.1
-        current_tau = max(0.1, 0.5 - 0.4 * min(1.0, iter / 5000.0))
-        # 权重 lambda: 前 5000 步从 0 线性升到 0.05
-        lambda_epcl = 0.05 * min(1.0, iter / 5000.0) if train else 0.05
+        # === [v5] 甜区静态参数: τ=0.3, λ→0.07, warmup=3000步 ===
+        # 权重 lambda: 前 3000 步从 0 线性升到 0.07
+        lambda_epcl = 0.07 * min(1.0, iter / 3000.0) if train else 0.07
 
         if train:
-            loss_epcl = self.epcl_criterion(emo_rep, emo_label, current_tau)
+            loss_epcl = self.epcl_criterion(emo_rep, emo_label)
         else:
             loss_epcl = 0.0
         # ================================
