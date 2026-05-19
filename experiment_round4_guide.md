@@ -147,5 +147,5 @@ tensorboard --logdir save/test
 python main.py --model cem --batch_size 16 --cuda --test --model_path save/test/CEM_XXXXX_XX.XXXX
 
 # Accuracy 最优权重
-python main.py --model cem --batch_size 16 --cuda --test --model_path save/test/CEM_ACC_XXXXX_X.XXXX
+  python main.py --model cem --batch_size 16 --cuda --test --model_path save/test/CEM_ACC_XXXXX_X.XXXX
 ```
