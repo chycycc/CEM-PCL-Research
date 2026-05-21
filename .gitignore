@@ -14,3 +14,7 @@ results.txt
 config.txt
 events.out.tfevents*
 .chatledger/Integrating_Emotion_Prototype_Contrastive_Learning_96e8b80a7ac2.md
+
+# Large model weights and temp files
+release_v5/CEM_*
+npx
