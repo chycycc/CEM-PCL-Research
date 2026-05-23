@@ -26,22 +26,46 @@ from src.utils.constants import MAP_EMO
 from sklearn.metrics import accuracy_score
 
 
-# ================= [新增: EPCL Loss v5 - 甜区静态温度] =================
+# ================= [EPCL + Uniformity Loss - 审查修订版] =================
 class PrototypeContrastiveLoss(nn.Module):
-    def __init__(self, num_prototypes, input_dim, temperature=0.3):
+    def __init__(self, num_prototypes, input_dim, temperature=0.3,
+                 t_uniform=2.0, alpha_uni=0.3):  # v6.1: 从1.0降至0.3，避免过度排斥
         super(PrototypeContrastiveLoss, self).__init__()
         self.temperature = temperature
-        self.prototypes = nn.Parameter(torch.randn(num_prototypes, input_dim))
+        self.t_uniform = t_uniform
+        self.alpha_uni = alpha_uni
+
+        self.prototypes = nn.Parameter(torch.empty(num_prototypes, input_dim))
         nn.init.xavier_uniform_(self.prototypes)
         self.prototypes.data = F.normalize(self.prototypes.data, p=2, dim=1)
 
-    def forward(self, features, labels):
+    def uniformity_loss(self, normalized_prototypes):
+        # 计算 32 个原型两两之间欧氏距离的平方: ||u-v||^2 = 2 - 2*(u·v)
+        sq_pdist = 2.0 - 2.0 * torch.matmul(
+            normalized_prototypes, normalized_prototypes.T
+        )
+        mask = torch.eye(
+            normalized_prototypes.size(0),
+            device=normalized_prototypes.device
+        ).bool()
+        # [C1 修复] out-of-place，消除 autograd version 风险
+        sq_pdist = sq_pdist.masked_fill(mask, float('inf'))
+        return torch.logsumexp(-self.t_uniform * sq_pdist, dim=1).mean()
+
+    def forward(self, features, labels, tau=None):
+        current_tau = tau if tau is not None else self.temperature
         features = F.normalize(features, p=2, dim=1)
-        prototypes = F.normalize(self.prototypes, p=2, dim=1)
-        logits = torch.matmul(features, prototypes.T) / self.temperature
-        loss = F.cross_entropy(logits, labels)
-        return loss
-# ======================================================
+        normalized_prototypes = F.normalize(self.prototypes, p=2, dim=1)
+
+        # Alignment Loss: 拉近样本特征与目标原型
+        logits = torch.matmul(features, normalized_prototypes.T) / current_tau
+        loss_align = F.cross_entropy(logits, labels)
+
+        # Uniformity Loss: 全局排斥，超球面均匀分布
+        loss_uni = self.uniformity_loss(normalized_prototypes)
+
+        return loss_align + self.alpha_uni * loss_uni
+# ==============================================================================
 
 
 class Encoder(nn.Module):
