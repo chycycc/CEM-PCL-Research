@@ -19,9 +19,10 @@ docs/
 │   ├── round2_guide.md          ← v2: τ=0.5, λ→0.05, warmup 2000（PPL突破）
 │   ├── round3_guide.md          ← v3: τ=0.2, λ→0.1, warmup 5000（双轨保存）
 │   ├── round4_guide.md          ← v4: τ 0.5→0.1 动态退火（Acc微超）
-│   ├── round5_guide.md          ← v5: τ=0.3, λ→0.07, warmup 3000（🏆 双超突破）
-│   ├── round6_guide.md          ← v6: +uniformity loss（超球面排斥力）
-│   └── v6_diagnostic_report.md  ← v6 实验数据诊断报告（Uniformity 退化分析）
+│   └── round5_guide.md          ← v5: τ=0.3, λ→0.07, warmup 3000（🏆 双超突破）
+│   ├── round6_guide.md          ← v6/v6.1: +uniformity loss（超球面排斥力）
+│   ├── v61_diagnostic_report.md ← v6.1 实验数据诊断报告（含训练曲线分析）
+│   └── images/                  ← 训练曲线截图（v61_acc/bce/ppl/lr/loss）
 └── figures/                     ← 可视化图表
     └── Fig_EPCL_tsne_v5.png     ← v5 情感隐空间 t-SNE 可视化
 ```
@@ -54,5 +55,6 @@ docs/
 | `save/test_round3/` | EPCL v3 训练结果 |
 | `save/test-v4/` | EPCL v4 训练结果 |
 | `save/test-v5/` | EPCL v5 训练结果（备份） |
-| `save/test/` | EPCL v5 训练结果（当前） |
+| `save/test/` | EPCL v6.1 训练结果（当前） |
+| `save/test-v6/` | EPCL v6 训练结果（备份） |
 | `release_v5/` | v5 最终发布权重与结果 |
