@@ -26,21 +26,34 @@ from src.utils.constants import MAP_EMO
 from sklearn.metrics import accuracy_score
 
 
-# ================= [EPCL + Uniformity Loss - 审查修订版] =================
+# ================= [EPCL v6.2: 特征空间解耦 (Projection Head) 方案] =================
+# 核心思想: 用非线性投影头隔离"对比学习空间"和"语言生成空间"，
+# 使 alignment/uniformity 的梯度经过投影层衰减后才回传主干，保护 PPL 底盘。
 class PrototypeContrastiveLoss(nn.Module):
     def __init__(self, num_prototypes, input_dim, temperature=0.3,
-                 t_uniform=2.0, alpha_uni=0.3):  # v6.1: 从1.0降至0.3，避免过度排斥
+                 t_uniform=2.0, alpha_uni=1.0):  # v6.2: 恢复 1.0，投影头充当梯度缓冲器
         super(PrototypeContrastiveLoss, self).__init__()
         self.temperature = temperature
         self.t_uniform = t_uniform
         self.alpha_uni = alpha_uni
 
+        # 【投影层构建】非线性映射: input_dim → bottleneck → input_dim
+        # bottleneck=128 强制信息压缩，只保留情感判别性特征
+        # ReLU 自动切断部分负梯度通道，形成天然减震器
+        proj_hidden = 128
+        self.projection_head = nn.Sequential(
+            nn.Linear(input_dim, proj_hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(proj_hidden, input_dim)
+        )
+
+        # 情感原型驻扎在投影后的对比子空间中
         self.prototypes = nn.Parameter(torch.empty(num_prototypes, input_dim))
         nn.init.xavier_uniform_(self.prototypes)
         self.prototypes.data = F.normalize(self.prototypes.data, p=2, dim=1)
 
     def uniformity_loss(self, normalized_prototypes):
-        # 计算 32 个原型两两之间欧氏距离的平方: ||u-v||^2 = 2 - 2*(u·v)
+        """仅在原型之间计算排斥力，梯度 100% 只流向 self.prototypes"""
         sq_pdist = 2.0 - 2.0 * torch.matmul(
             normalized_prototypes, normalized_prototypes.T
         )
@@ -48,21 +61,26 @@ class PrototypeContrastiveLoss(nn.Module):
             normalized_prototypes.size(0),
             device=normalized_prototypes.device
         ).bool()
-        # [C1 修复] out-of-place，消除 autograd version 风险
         sq_pdist = sq_pdist.masked_fill(mask, float('inf'))
         return torch.logsumexp(-self.t_uniform * sq_pdist, dim=1).mean()
 
     def forward(self, features, labels, tau=None):
         current_tau = tau if tau is not None else self.temperature
-        features = F.normalize(features, p=2, dim=1)
-        normalized_prototypes = F.normalize(self.prototypes, p=2, dim=1)
 
-        # Alignment Loss: 拉近样本特征与目标原型
-        logits = torch.matmul(features, normalized_prototypes.T) / current_tau
+        # 【空间转移】原始 features 原封不动保留给 Decoder（不截断主干计算图）
+        # 投影层将 features 映射到对比专属子空间
+        projected_features = self.projection_head(features)
+
+        # 所有对比度量在投影子空间的超球面上进行
+        proj_norm = F.normalize(projected_features, p=2, dim=1)
+        proto_norm = F.normalize(self.prototypes, p=2, dim=1)
+
+        # Alignment Loss: 拉近投影后样本与目标原型
+        logits = torch.matmul(proj_norm, proto_norm.T) / current_tau
         loss_align = F.cross_entropy(logits, labels)
 
-        # Uniformity Loss: 全局排斥，超球面均匀分布
-        loss_uni = self.uniformity_loss(normalized_prototypes)
+        # Uniformity Loss: 原型间排斥力（梯度不经过投影头）
+        loss_uni = self.uniformity_loss(proto_norm)
 
         return loss_align + self.alpha_uni * loss_uni
 # ==============================================================================

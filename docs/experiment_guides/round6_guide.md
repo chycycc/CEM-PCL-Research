@@ -350,4 +350,90 @@ v6.1 ACC-best Acc=38.65% (满足) 但 PPL=38.45 (严重退化)。双条件未同
 | v6 ACC | 0.3 | 0.07 | α=1.0 | 38.28 | 37.51% | ❌ 劣于基线 |
 | v6.1 PPL | 0.3 | 0.07 | α=0.3 | 37.07 | 37.79% | ❌ PPL 未达标 |
 | v6.1 ACC | 0.3 | 0.07 | α=0.3 | 38.45 | **38.65%** | ⚠ Acc 历史最高，PPL 严重退化 |
+| v6.2 PPL | 0.3 | 0.07 | ProjHead+α=1.0 | **36.25** 🏆 | 38.00% | ⚠ PPL 历史最低，Acc 差 0.17pp |
+| v6.2 ACC | 0.3 | 0.07 | ProjHead+α=1.0 | 38.23 | **39.30%** 🏆 | ⚠ Acc 历史最高，PPL 退化 |
 
+---
+
+## 第七章: v6.2 — 特征空间解耦 (Projection Head)
+
+### 7.1 架构变更概述
+
+v6/v6.1 的失败根因是**对比学习梯度直接作用于语言生成共享特征空间**。v6.2 引入 SimCLR 式非线性投影头，实现物理隔离。
+
+```
+原始特征 (emo_rep, 300维)
+    │
+    ├── 原封不动 ──→ Decoder (生成任务, PPL)
+    │
+    └── Projection Head ──→ 投影子空间 (对比学习, Accuracy)
+         Linear(300→128)
+         ReLU
+         Linear(128→300)
+              │
+              ├── Alignment: projected ↔ prototypes
+              └── Uniformity: prototypes ↔ prototypes
+```
+
+### 7.2 代码变更清单
+
+| 文件 | 变更点 | 说明 |
+| --- | --- | --- |
+| `model.py:29-89` | `PrototypeContrastiveLoss` 全面重写 | 新增投影头，alpha_uni=1.0 |
+| `model.py` 其余 | **无变更** | `train_one_batch` 调用签名兼容 |
+
+新增参数量: ~77k，占模型总参数 <1%。
+
+### 7.3 执行清单
+
+#### Task 1: 环境准备
+
+- [x] 确认 `model.py` 已包含投影头版本的 `PrototypeContrastiveLoss`
+- [x] 备份 v6.1 结果: `Rename-Item save\test save\test-v61`
+- [x] 清理 `save\test\` 目录
+
+#### Task 2: 启动训练
+
+```powershell
+conda activate cem_env
+cd E:\github\CEM-master
+python main.py --model cem --batch_size 16 --cuda
+```
+
+#### Task 3: 训练过程监控
+
+重点关注：
+
+- **PPL 验证集**：投影头隔离效果的核心验证。若 PPL 走势与 v5 相当（无退化），说明解耦成功
+- **BCE 验证集分叉点**：v6.1 在 ~18k 步分叉。v6.2 预期分叉点应延后或消失
+- **验证 Acc 峰值**：应 ≥ v6.1 的 41.49%（投影头+全量排斥力理应更强）
+
+#### Task 4: 测试与归档
+
+```powershell
+# PPL-best 测试
+python main.py --model cem --batch_size 16 --cuda --test --model_path save/test/CEM_[步数]_[PPL]
+Rename-Item "save/test/results.txt" "results - ppl_best.txt"
+
+# ACC-best 测试
+python main.py --model cem --batch_size 16 --cuda --test --model_path save/test/CEM_ACC_[步数]_[Acc]
+Rename-Item "save/test/results.txt" "results - acc_best.txt"
+```
+
+#### Task 5: 决策分支
+
+| 测试结果 | 行动 |
+| --- | --- |
+| PPL ≤ 36.88 **且** Acc ≥ 38.17% | ✅ v6.2 成功，投影头+uniformity 成为最终版本 |
+| PPL 不退化但 Acc 未超 v5 | 投影头有效但排斥力强度需微调 |
+| PPL 仍退化 | **终止 uniformity 路线，确认 v5 为最终架构** |
+
+### 7.4 v6.2 实际结果
+
+**测试集双检查点**:
+- PPL-best (step 19999): PPL=**36.25** 🏆, Acc=38.00% → PPL 创历史最低
+- ACC-best (step 13999): PPL=38.23, Acc=**39.30%** 🏆 → Acc 创历史最高
+
+**判定**: PPL-best Acc=38.00% 差 v5 的 38.17% 仅 0.17pp（统计噪声级），投影头解耦在 PPL 维度验证成功（36.25 < 36.40），但 BCE 过拟合分叉 (~14k步) 仍导致双条件无法在同一检查点严格同时满足。
+
+详细分析见 [v62_diagnostic_report.md](v62_diagnostic_report.md)。
