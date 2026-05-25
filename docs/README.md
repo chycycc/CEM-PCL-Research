@@ -23,7 +23,9 @@ docs/
 │   ├── round6_guide.md          ← v6/v6.1: +uniformity loss（超球面排斥力）
 │   ├── v61_diagnostic_report.md ← v6.1 实验数据诊断报告（含训练曲线分析）
 │   ├── v62_diagnostic_report.md ← v6.2 投影头解耦实验诊断报告
-│   └── images/                  ← 训练曲线截图（v61/v62 acc/bce/ppl/lr/loss）
+│   ├── round63_guide.md         ← v6.3: 异步截断退火 + 拓扑锚点
+│   ├── v63_diagnostic_report.md ← v6.3 截断退火实验诊断报告（❌ 策略失败）
+│   └── images/                  ← 训练曲线截图（v61/v62/v63 acc/bce/ppl/lr/loss）
 └── figures/                     ← 可视化图表
     └── Fig_EPCL_tsne_v5.png     ← v5 情感隐空间 t-SNE 可视化
 ```

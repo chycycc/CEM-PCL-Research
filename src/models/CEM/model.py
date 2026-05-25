@@ -659,9 +659,26 @@ class CEM(nn.Module):
             dec_batch.contiguous().view(-1),
         )
 
-        # === [v5] 甜区静态参数: τ=0.3, λ→0.07, warmup=3000步 ===
-        # 权重 lambda: 前 3000 步从 0 线性升到 0.07
-        lambda_epcl = 0.07 * min(1.0, iter / 3000.0) if train else 0.07
+        # === [v6.3 异步截断退火 + 拓扑锚点调度] ===
+        # 核心思想: 让分类任务在 14k 步"先下课"，保留微量锚点防止灾难性遗忘
+        if not train:
+            # 验证集保持 0.07 满载计算，确保 TensorBoard 曲线数值全程可比
+            lambda_epcl = 0.07
+        else:
+            if iter < 3000:
+                # 阶段 1 (0-3k): 升温期，对比学习平滑介入
+                lambda_epcl = 0.07 * (iter / 3000.0)
+            elif iter < 12000:
+                # 阶段 2 (3k-12k): 甜区稳定期，全力撕裂情感边界
+                lambda_epcl = 0.07
+            elif iter < 15000:
+                # 阶段 3 (12k-15k): 线性衰减到锚点值，无跳变
+                decay_progress = (iter - 12000) / 3000.0  # 0→1
+                lambda_epcl = 0.07 * (1 - decay_progress) + 0.005 * decay_progress
+            else:
+                # 阶段 4 (15k+): 拓扑锚点维持期，压制漂移不引发过拟合
+                lambda_epcl = 0.005
+        # ============================================
 
         if train:
             loss_epcl = self.epcl_criterion(emo_rep, emo_label)
