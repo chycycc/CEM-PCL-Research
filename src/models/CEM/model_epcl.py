@@ -26,22 +26,64 @@ from src.utils.constants import MAP_EMO
 from sklearn.metrics import accuracy_score
 
 
-# ================= [新增: EPCL Loss] =================
+# ================= [EPCL v6.2: 特征空间解耦 (Projection Head) 方案] =================
+# 核心思想: 用非线性投影头隔离"对比学习空间"和"语言生成空间"，
+# 使 alignment/uniformity 的梯度经过投影层衰减后才回传主干，保护 PPL 底盘。
 class PrototypeContrastiveLoss(nn.Module):
-    def __init__(self, num_prototypes, input_dim, temperature=0.3):
+    def __init__(self, num_prototypes, input_dim, temperature=0.3,
+                 t_uniform=2.0, alpha_uni=1.0):  # v6.2: 恢复 1.0，投影头充当梯度缓冲器
         super(PrototypeContrastiveLoss, self).__init__()
         self.temperature = temperature
-        self.prototypes = nn.Parameter(torch.randn(num_prototypes, input_dim))
+        self.t_uniform = t_uniform
+        self.alpha_uni = alpha_uni
+
+        # 【投影层构建】非线性映射: input_dim → bottleneck → input_dim
+        # bottleneck=128 强制信息压缩，只保留情感判别性特征
+        # ReLU 自动切断部分负梯度通道，形成天然减震器
+        proj_hidden = 128
+        self.projection_head = nn.Sequential(
+            nn.Linear(input_dim, proj_hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(proj_hidden, input_dim)
+        )
+
+        # 情感原型驻扎在投影后的对比子空间中
+        self.prototypes = nn.Parameter(torch.empty(num_prototypes, input_dim))
         nn.init.xavier_uniform_(self.prototypes)
         self.prototypes.data = F.normalize(self.prototypes.data, p=2, dim=1)
 
-    def forward(self, features, labels):
-        features = F.normalize(features, p=2, dim=1)
-        prototypes = F.normalize(self.prototypes, p=2, dim=1)
-        logits = torch.matmul(features, prototypes.T) / self.temperature
-        loss = F.cross_entropy(logits, labels)
-        return loss
-# ======================================================
+    def uniformity_loss(self, normalized_prototypes):
+        """仅在原型之间计算排斥力，梯度 100% 只流向 self.prototypes"""
+        sq_pdist = 2.0 - 2.0 * torch.matmul(
+            normalized_prototypes, normalized_prototypes.T
+        )
+        mask = torch.eye(
+            normalized_prototypes.size(0),
+            device=normalized_prototypes.device
+        ).bool()
+        sq_pdist = sq_pdist.masked_fill(mask, float('inf'))
+        return torch.logsumexp(-self.t_uniform * sq_pdist, dim=1).mean()
+
+    def forward(self, features, labels, tau=None):
+        current_tau = tau if tau is not None else self.temperature
+
+        # 【空间转移】原始 features 原封不动保留给 Decoder（不截断主干计算图）
+        # 投影层将 features 映射到对比专属子空间
+        projected_features = self.projection_head(features)
+
+        # 所有对比度量在投影子空间的超球面上进行
+        proj_norm = F.normalize(projected_features, p=2, dim=1)
+        proto_norm = F.normalize(self.prototypes, p=2, dim=1)
+
+        # Alignment Loss: 拉近投影后样本与目标原型
+        logits = torch.matmul(proj_norm, proto_norm.T) / current_tau
+        loss_align = F.cross_entropy(logits, labels)
+
+        # Uniformity Loss: 原型间排斥力（梯度不经过投影头）
+        loss_uni = self.uniformity_loss(proto_norm)
+
+        return loss_align + self.alpha_uni * loss_uni
+# ==============================================================================
 
 
 class Encoder(nn.Module):
@@ -390,6 +432,8 @@ class CEM(nn.Module):
             filter_size=config.filter,
         )
 
+        # === [v6.4] 分类头增加 Dropout 正则化，抑制 BCE 过拟合 ===
+        self.emo_dropout = nn.Dropout(0.3)
         self.emo_lin = nn.Linear(config.hidden_dim, decoder_number, bias=False)
         if not config.woCOG:
             self.cog_lin = MLP()
@@ -535,12 +579,12 @@ class CEM(nn.Module):
             emo_ref_ctx = self.emo_ref_encoder(emo_concat, src_mask)
             # === [修改 START] ===
             emo_rep = emo_ref_ctx[:, 0]
-            emo_logits = self.emo_lin(emo_rep)
+            emo_logits = self.emo_lin(self.emo_dropout(emo_rep))  # [v6.4] Dropout 正则化
             # === [修改 END] ===
         else:
             # === [修改 START] ===
             emo_rep = enc_outputs[:, 0]
-            emo_logits = self.emo_lin(emo_rep)
+            emo_logits = self.emo_lin(self.emo_dropout(emo_rep))  # [v6.4] Dropout 正则化
             # === [修改 END] ===
 
         # Cognition
@@ -617,15 +661,34 @@ class CEM(nn.Module):
             dec_batch.contiguous().view(-1),
         )
 
-        # === [新增] 计算 EPCL 对比损失 ===
+        # === [v6.4 分类头早停 + Dropout 正则化] ===
+        # 核心策略: 分类头 emo_lin 在 14k 步达峰后"下课"
+        # - 14k 前: emo_loss 参与总损失（分类学习期）
+        # - 14k 后: 冻结 emo_lin 参数 + emo_loss 置零（分类下课，只保留 EPCL 锚点）
+        # - Dropout(0.3) 在 forward 中已插入 emo_lin 前，全程正则化
+        emo_head_active = (not train) or (iter < 14000)
+        if train and iter == 14000:
+            # 精确在 14k 步冻结分类头参数
+            for p in self.emo_lin.parameters():
+                p.requires_grad = False
+            print(f"[v6.4] Step {iter}: 分类头 emo_lin 已冻结 (requires_grad=False)")
+
+        # λ_epcl 恢复 v6.2 恒定调度（3k warmup + 0.07 满载）
+        # v6.3 截断退火已证实打击友军，回退此策略
+        if iter < 3000 and train:
+            lambda_epcl = 0.07 * (iter / 3000.0)
+        else:
+            lambda_epcl = 0.07
+        # ============================================
+
         if train:
             loss_epcl = self.epcl_criterion(emo_rep, emo_label)
         else:
             loss_epcl = 0.0
-
-        # 引入 Warm-up: 前 3000 step 线性增加到 0.07
-        lambda_epcl = 0.07 * min(1.0, iter / 3000.0) if train else 0.07
         # ================================
+
+        # 14k 后 emo_loss 置零: 分类梯度完全切断，只保留 EPCL 对表征的锚定
+        effective_emo_loss = emo_loss if emo_head_active else 0.0
 
         if not (config.woDiv):
             _, preds = logit.max(dim=-1)
@@ -639,11 +702,11 @@ class CEM(nn.Module):
                 dec_batch.contiguous().view(-1),
             )
             div_loss /= target_tokens
-            # [修改] 加入 EPCL 损失
-            loss = emo_loss + 1.5 * div_loss + ctx_loss + (lambda_epcl * loss_epcl)
+            # [v6.4] emo_loss 在 14k 后被 effective_emo_loss=0 替代
+            loss = effective_emo_loss + 1.5 * div_loss + ctx_loss + (lambda_epcl * loss_epcl)
         else:
-            # [修改] 加入 EPCL 损失
-            loss = emo_loss + ctx_loss + (lambda_epcl * loss_epcl)
+            # [v6.4] emo_loss 在 14k 后被 effective_emo_loss=0 替代
+            loss = effective_emo_loss + ctx_loss + (lambda_epcl * loss_epcl)
 
         pred_program = np.argmax(emo_logits.detach().cpu().numpy(), axis=1)
         program_acc = accuracy_score(batch["program_label"], pred_program)
