@@ -432,6 +432,8 @@ class CEM(nn.Module):
             filter_size=config.filter,
         )
 
+        # === [v6.4] 分类头增加 Dropout 正则化，抑制 BCE 过拟合 ===
+        self.emo_dropout = nn.Dropout(0.3)
         self.emo_lin = nn.Linear(config.hidden_dim, decoder_number, bias=False)
         if not config.woCOG:
             self.cog_lin = MLP()
@@ -577,12 +579,12 @@ class CEM(nn.Module):
             emo_ref_ctx = self.emo_ref_encoder(emo_concat, src_mask)
             # === [修改 START] ===
             emo_rep = emo_ref_ctx[:, 0]
-            emo_logits = self.emo_lin(emo_rep)
+            emo_logits = self.emo_lin(self.emo_dropout(emo_rep))  # [v6.4] Dropout 正则化
             # === [修改 END] ===
         else:
             # === [修改 START] ===
             emo_rep = enc_outputs[:, 0]
-            emo_logits = self.emo_lin(emo_rep)
+            emo_logits = self.emo_lin(self.emo_dropout(emo_rep))  # [v6.4] Dropout 正则化
             # === [修改 END] ===
 
         # Cognition
@@ -659,25 +661,24 @@ class CEM(nn.Module):
             dec_batch.contiguous().view(-1),
         )
 
-        # === [v6.3 异步截断退火 + 拓扑锚点调度] ===
-        # 核心思想: 让分类任务在 14k 步"先下课"，保留微量锚点防止灾难性遗忘
-        if not train:
-            # 验证集保持 0.07 满载计算，确保 TensorBoard 曲线数值全程可比
-            lambda_epcl = 0.07
+        # === [v6.4 分类头早停 + Dropout 正则化] ===
+        # 核心策略: 分类头 emo_lin 在 14k 步达峰后"下课"
+        # - 14k 前: emo_loss 参与总损失（分类学习期）
+        # - 14k 后: 冻结 emo_lin 参数 + emo_loss 置零（分类下课，只保留 EPCL 锚点）
+        # - Dropout(0.3) 在 forward 中已插入 emo_lin 前，全程正则化
+        emo_head_active = (not train) or (iter < 14000)
+        if train and iter == 14000:
+            # 精确在 14k 步冻结分类头参数
+            for p in self.emo_lin.parameters():
+                p.requires_grad = False
+            print(f"[v6.4] Step {iter}: 分类头 emo_lin 已冻结 (requires_grad=False)")
+
+        # λ_epcl 恢复 v6.2 恒定调度（3k warmup + 0.07 满载）
+        # v6.3 截断退火已证实打击友军，回退此策略
+        if iter < 3000 and train:
+            lambda_epcl = 0.07 * (iter / 3000.0)
         else:
-            if iter < 3000:
-                # 阶段 1 (0-3k): 升温期，对比学习平滑介入
-                lambda_epcl = 0.07 * (iter / 3000.0)
-            elif iter < 12000:
-                # 阶段 2 (3k-12k): 甜区稳定期，全力撕裂情感边界
-                lambda_epcl = 0.07
-            elif iter < 15000:
-                # 阶段 3 (12k-15k): 线性衰减到锚点值，无跳变
-                decay_progress = (iter - 12000) / 3000.0  # 0→1
-                lambda_epcl = 0.07 * (1 - decay_progress) + 0.005 * decay_progress
-            else:
-                # 阶段 4 (15k+): 拓扑锚点维持期，压制漂移不引发过拟合
-                lambda_epcl = 0.005
+            lambda_epcl = 0.07
         # ============================================
 
         if train:
@@ -685,6 +686,9 @@ class CEM(nn.Module):
         else:
             loss_epcl = 0.0
         # ================================
+
+        # 14k 后 emo_loss 置零: 分类梯度完全切断，只保留 EPCL 对表征的锚定
+        effective_emo_loss = emo_loss if emo_head_active else 0.0
 
         if not (config.woDiv):
             _, preds = logit.max(dim=-1)
@@ -698,11 +702,11 @@ class CEM(nn.Module):
                 dec_batch.contiguous().view(-1),
             )
             div_loss /= target_tokens
-            # [修改] 加入 EPCL 损失
-            loss = emo_loss + 1.5 * div_loss + ctx_loss + (lambda_epcl * loss_epcl)
+            # [v6.4] emo_loss 在 14k 后被 effective_emo_loss=0 替代
+            loss = effective_emo_loss + 1.5 * div_loss + ctx_loss + (lambda_epcl * loss_epcl)
         else:
-            # [修改] 加入 EPCL 损失
-            loss = emo_loss + ctx_loss + (lambda_epcl * loss_epcl)
+            # [v6.4] emo_loss 在 14k 后被 effective_emo_loss=0 替代
+            loss = effective_emo_loss + ctx_loss + (lambda_epcl * loss_epcl)
 
         pred_program = np.argmax(emo_logits.detach().cpu().numpy(), axis=1)
         program_acc = accuracy_score(batch["program_label"], pred_program)

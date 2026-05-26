@@ -25,6 +25,8 @@ docs/
 │   ├── v62_diagnostic_report.md ← v6.2 投影头解耦实验诊断报告
 │   ├── round63_guide.md         ← v6.3: 异步截断退火 + 拓扑锚点
 │   ├── v63_diagnostic_report.md ← v6.3 截断退火实验诊断报告（❌ 策略失败）
+│   ├── round64_guide.md         ← v6.4: 分类头早停 + Dropout 正则化
+│   ├── v64_diagnostic_report.md ← v6.4 诊断报告（✅ 双超达成，历史最优）
 │   └── images/                  ← 训练曲线截图（v61/v62/v63 acc/bce/ppl/lr/loss）
 └── figures/                     ← 可视化图表
     └── Fig_EPCL_tsne_v5.png     ← v5 情感隐空间 t-SNE 可视化

@@ -3,7 +3,7 @@
 > **实验**: EPCL v6.2 — 特征空间解耦 (Projection Head + Uniformity α=1.0)
 > **日期**: 2026-05-24
 > **训练时长**: ~51min (26k steps)
-> **硬件**: RTX 4060 Laptop, CUDA
+> **硬件**: RTX 3050 Ti 4G, CUDA
 > **架构变更**: 新增非线性投影头 `Linear(300→128) → ReLU → Linear(128→300)`，alpha_uni 恢复 1.0
 
 ---
