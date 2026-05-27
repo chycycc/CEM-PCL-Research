@@ -18,3 +18,7 @@ events.out.tfevents*
 # Large model weights and temp files
 release_v5/CEM_*
 npx
+
+# Agent workspace
+.agent/
+.agents/
